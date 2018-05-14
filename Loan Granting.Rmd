@@ -1,0 +1,258 @@
+---
+title: "Loan Granting"
+author: "Mitul Shah"
+date: "8/9/2017"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+
+## Loading the data
+
+```{r}
+
+## Loading the datasets
+borrower_table <- read.csv("loan/borrower_table.csv")
+loan_table <- read.csv("loan/loan_table.csv")
+
+## Merging the datasets
+data = merge(borrower_table, loan_table, by = "loan_id", all.x = TRUE)
+
+```
+
+
+## Checking Data Quality
+
+The columns fully repaid previous loans and currently repaying other loans provide the same information. Both these columns cannot have the same value as we have access to a specific bank loan data. Let's check this. 
+
+```{r}
+
+## Number of rows with fully repaid previous loans = 1 and currently repaying other loans = 1
+nrow(subset(data, data$fully_repaid_previous_loans == 1 & data$currently_repaying_other_loans == 1))
+
+## Number of rows with fully repaid previous loans = 0 and currently repaying other loans = 0
+nrow(subset(data, data$fully_repaid_previous_loans == 0 & data$currently_repaying_other_loans == 0))
+
+```
+
+
+We need to remove these rows from the data. 
+
+```{r}
+
+## Subsetting rows with 0s in column 3 and 4 simultaneously
+newdata1 <- data[which(data$fully_repaid_previous_loans == 0 & data$currently_repaying_other_loans == 0),]
+
+## Subsetting rows with 1s in column 3 and 4 simultaneously
+newdata2 <- data[which(data$fully_repaid_previous_loans == 1 & data$currently_repaying_other_loans == 1),]
+
+## Removing the above rows
+newdata <- data[-c(as.numeric(rownames(newdata1)),as.numeric(rownames(newdata2))),]
+
+## Removing the column 4 as it indicates the same information as column 3
+newdata <- newdata[, -4]
+
+## Replace missing values 
+newdata[3][is.na(newdata[3])] <- 2
+newdata[5][is.na(newdata[5])] <- 0
+
+## Looking at the structure
+str(newdata)
+
+## Convert some variables to factors
+newdata$is_first_loan <- as.factor(newdata$is_first_loan)
+newdata$fully_repaid_previous_loans <- as.factor(newdata$fully_repaid_previous_loans)
+newdata$is_employed <- as.factor(newdata$is_employed)
+newdata$loan_repaid <- as.factor(newdata$loan_repaid)
+newdata$loan_granted <- as.factor(newdata$loan_granted)
+
+## Load the library lubridate
+library(lubridate)
+
+## Convert date to date variable 
+newdata$date <- as.Date(newdata$date, format = "%Y-%m-%d")
+
+## Extract day of the week and 
+newdata$week <- week(newdata$date)
+newdata$weekday <- as.factor(weekdays(newdata$date))
+
+```
+
+
+## Building a model better than the bank's model
+
+Here, we have access to the data saying whether the borrower repaid the loan or not. So, in order to build a model better than the bank's model, we can predict which loan borrowers will repay the loan. If she will repay the loan, than we should grant the loan to her, otherwise not. 
+
+But first, we need to subset the data for which the loan was granted by the bank since only for those observations, we would know whether the borrower repaid the loan or not. 
+
+```{r}
+
+## Load dplyr
+library(dplyr)
+
+## Subsetting observations for which the bank granted the laan
+bank_loan_granted_data <- filter(newdata, loan_granted == 1)
+
+```
+
+
+Now, we will build the model to predict who will repay the loan using Random Forest. 
+
+```{r}
+
+## Taking 66% data as training data
+train_sample <- sample(nrow(bank_loan_granted_data), size = nrow(bank_loan_granted_data)*0.66)
+
+## Training data
+train_data <- bank_loan_granted_data[train_sample,]
+train_data <- train_data[, -c(1, 13, 14)]
+
+## Test data
+test_data <- bank_loan_granted_data[-train_sample,]
+test_data <- test_data[, -c(1, 13, 14)]
+
+## Load the library randomForest
+library(randomForest)
+
+## Random Forest Model
+rf <- randomForest(y = train_data$loan_repaid, x = train_data[, -12],
+ytest = test_data$loan_repaid, xtest = test_data[, -12], ntree = 100, mtry = 3, keep.forest = TRUE)
+rf
+
+```
+
+
+## Impact of the most important variables on the prediction 
+
+
+```{r}
+
+## Variable importance plot
+varImpPlot(rf, type=2)
+
+```
+
+The most important variables are saving amount, checking amount, yearly salary and the total credit card limit. 
+
+Here are the partial dependence plots of these four variables:
+
+```{r}
+
+## Partial dependence plot of Saving Amount 
+partialPlot(rf, train_data, saving_amount , 1)
+
+## Partial dependence plot of Checking Amount
+partialPlot(rf, train_data, checking_amount , 1)
+
+## Partial dependence plot of yearly salary
+partialPlot(rf, train_data, yearly_salary , 1)
+
+## Partial dependence plot of total credit card limit
+partialPlot(rf, train_data, total_credit_card_limit , 1)
+
+```
+
+
+## Impact of the variable "is_employed"
+
+
+```{r}
+
+## Table for employed and the borrowers who repay the loan
+table(test_data$is_employed, test_data$loan_repaid)
+
+## Number of unemployed who repays the loan
+250 / (250 + 883)
+
+## Number of employed who repay the loan
+9307 / (9307 + 3288)
+
+```
+
+So, we see that just 22 percent of people who are unemployed repay the loan while 73 percent of the people who are employed repay the loan, given these people are granted the loan. So this variable was definitely significant. But, the variables like Saving Amount, Checking Amount, yearly salary and total credit card limit highly correlates with this variable "is_employed", due to which it appreared to be insignificant in the variable importance plot. 
+
+
+## Compare Bank Profitability vs Our Model Profitability
+
+We will compare the profitability only for the test set using the rules given in the challenge, i.e. 
+
+1. If you grant the loan and the it doesn't get repaid, you lose 1
+2. If you grant the loan and the it does get repaid, you gain 1
+3. If you don't grant the loan, you gain 0
+
+#### Bank Profitability
+
+```{r}
+
+## Bank Profitability using the above rules (test data has all observations where bank granted the loan)
+nrow(filter(test_data, loan_repaid == 1)) - nrow(filter(test_data, loan_repaid == 0))
+
+```
+
+#### Our Model Profitability
+
+```{r}
+
+## Load ROCR
+library(ROCR)
+
+## Random Forest Predictions
+rf_results <- data.frame(actually_repaid = test_data$loan_repaid, predictions = rf$test$votes[,2])                                                        
+
+## ROC Curve to look at tpr vs fpr 
+pred <- prediction(rf_results$predictions, rf_results$actually_repaid)             
+perf <- performance(pred, measure = "tpr", x.measure = "fpr")
+plot(perf) + abline(a = 0, b = 1, col = "red")
+
+```
+
+Here, according to the rules given to evaluate the model, we care more about the difference between True Positives and the False Positives. False Negatives doesn't make any difference here according to the method of evaluation. 
+
+We can decrease the False Positives by increasing the threshold. But at the same time, the True Positives would also decrease. We need to increase the TPs and decrease the FPs.
+
+I have shown the results using four different thresholds of 0.4, 0.5, 0.6 and 0.7 here. 
+
+```{r}
+
+## Choosing four different thresholds 
+rf_results$prediction_threshold_0.4 <- ifelse(rf_results$predictions > 0.4, 1, 0)      
+rf_results$prediction_threshold_0.5 <- ifelse(rf_results$predictions > 0.5, 1, 0)      
+rf_results$prediction_threshold_0.6 <- ifelse(rf_results$predictions > 0.6, 1, 0)   
+rf_results$prediction_threshold_0.7 <- ifelse(rf_results$predictions > 0.7, 1, 0)  
+
+## Confusion Matrix for the threshold of 0.4
+table(rf_results$actually_repaid, rf_results$prediction_threshold_0.4)
+
+## Our model Profitability for the threshold of 0.4 
+9069 - 713
+
+## Confusion Matrix for the threshold of 0.5
+table(rf_results$actually_repaid, rf_results$prediction_threshold_0.5)
+
+## Our model Profitability for the threshold of 0.5
+8897 - 476
+
+## Confusion Matrix for the threshold of 0.6
+table(rf_results$actually_repaid, rf_results$prediction_threshold_0.6)
+
+## Our model Profitability for the threshold of 0.4 
+8683 - 306
+
+## Confusion Matrix for the threshold of 0.7
+table(rf_results$actually_repaid, rf_results$prediction_threshold_0.7)
+
+## Our model Profitability for the threshold of 0.4 
+8447 - 183
+
+```
+
+
+Probably the model with the threshold of 0.5 would be the best here as the Profitability is highest for that value. 
+
+## Other Variables we would like to include in the model
+
+1. Loan Amount
+2. Loan Amount Term
+3. Credit History
+4. Co-applicant Income
